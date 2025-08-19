@@ -1,4 +1,4 @@
-# === Riemann-phase inverse pipeline (Full fixed Colab; single cell) ===
+# === Riemann-phase inverse pipeline (Full Colab, tuned & fixed) ===
 import numpy as np, math, time, warnings, csv
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
@@ -18,12 +18,12 @@ RUN_NOISE_SCAN  = True     # 三维敏感度：noise × (导数强度) × sX_gai
 RUN_N_EXTRAP    = True     # n→∞ 外推
 EXPORT_CSV      = True
 
-# ===== 默认值（建议先用；AutoTune 会给更优） =====
+# ===== Tuned defaults per request =====
 DEFAULT_DERIV_MODE     = "fft"    # "fft" | "spline" | "fd5"
 DEFAULT_T_SMOOTH_GAIN  = 3.0      # spline 导数器：s_T = gain * M * Var(T)
-DEFAULT_FFT_CUTOFF     = 0.35     # fft 导数器：低通截止占 Nyquist 比例 ∈ (0,1)
-DEFAULT_SX_GAIN        = 1.0      # log(N_hat) 样条平滑强度；=0 关闭（基线列）
-DEFAULT_SX_USE_VAR     = True     # True: sX = gain * M * Var(X)；False: 常数 gain
+DEFAULT_FFT_CUTOFF     = 0.30     # *** tuned cutoff ***
+DEFAULT_SX_GAIN        = 1.8      # *** tuned log-domain smoothing gain ***
+DEFAULT_SX_USE_VAR     = True     # sX = gain * M * Var(X)
 
 # ---------------- Configs ----------------
 @dataclass
@@ -48,8 +48,8 @@ class InverseConfig:
     spline_k: int = 3
     enforce_meanN: bool = True
     log_clip: float = 40.0
-    sX_gain: float = DEFAULT_SX_GAIN              # log-domain smoothing strength (0=off)
-    sX_use_variance: bool = DEFAULT_SX_USE_VAR    # True: gain * M * Var(X); False: constant sX_gain
+    sX_gain: float = DEFAULT_SX_GAIN              # *** tuned ***
+    sX_use_variance: bool = DEFAULT_SX_USE_VAR
 
 # ---------------- Utils ----------------
 def rmse(a, b) -> float:
@@ -228,7 +228,7 @@ def derivative_fd5(u, T):
     return d
 
 # ---------------- 一致性层工具（低通/维纳 + TV） ----------------
-def lowpass_fft(y, du, cutoff_ratio=0.35):
+def lowpass_fft(y, du, cutoff_ratio=0.30):
     y = np.asarray(y); m=len(y)
     y_ref = np.concatenate([y, y[-2:0:-1]])
     M = len(y_ref)
@@ -254,10 +254,10 @@ def wiener1d(y, noise_var=None, du=1.0, cutoff_ratio=0.5, eps=1e-12):
     y_hat = np.fft.irfft(Yf, n=M)[:m]
     return y_hat
 
-def tv_denoise_logN(logN, lam=5e-3, iters=30):
+def tv_denoise_logN(logN, lam=2e-3, iters=30):
     """
     1D TV-L2 on logN（Rudin–Osher–Fatemi 简化迭代）
-    修复：使用 len(x)-1 的前向差分，并用原位散度填回，避免长度 +1 的拼接错误。
+    *** 修复版：使用 len(x)-1 的前向差分，并用原位散度回填（长度匹配） ***
     """
     x = logN.copy().astype(float)
     for _ in range(iters):
@@ -274,12 +274,12 @@ def tv_denoise_logN(logN, lam=5e-3, iters=30):
     return x
 
 def refine_N_with_T_consistency(u, N_init, T_meas, c0=1.0,
-                                step=0.6, iters=4, lp_ratio=0.35,
-                                use_wiener=True, tv_on_log=True, tv_lam=5e-3):
+                                step=0.5, iters=6, lp_ratio=0.30,
+                                use_wiener=True, tv_on_log=True, tv_lam=2e-3):
     """
-    最小化 || T_meas - (1/c0)CumSum(N) ||^2 的一致性修正：
+    最小化 || T_meas - (1/c0)CumSum(N) ||^2 的一致性修正（tuned 版）：
     N <- N + step * c0 * d/du[ LP(Wiener(T_meas - T_hat)) ]
-    每步保持 <N>=1；在 logN 上做轻微 TV 去噪。
+    每步保持 <N>=1；在 logN 上做温和 TV 去噪。
     """
     u = np.asarray(u); N = N_init.copy().astype(float); du = float(u[1]-u[0])
     for _ in range(iters):
@@ -295,6 +295,7 @@ def refine_N_with_T_consistency(u, N_init, T_meas, c0=1.0,
         logN = np.log(np.clip(N, 1e-300, 1e300))
         if tv_on_log:
             logN = tv_denoise_logN(logN, lam=tv_lam, iters=20)
+        # 强制 <log N>=0 -> <N>=1
         logN -= (np.trapz(logN, x=u)/(u[-1]-u[0]))
         N = np.exp(logN)
     meanN = np.trapz(N, x=u)/(u[-1]-u[0])
@@ -347,8 +348,8 @@ cfg_fwd = ForwardConfig()
 cfg_inv = InverseConfig(
     deriv_mode=DEFAULT_DERIV_MODE,
     T_smooth_gain=DEFAULT_T_SMOOTH_GAIN,
-    fft_cutoff_ratio=DEFAULT_FFT_CUTOFF,
-    sX_gain=DEFAULT_SX_GAIN,
+    fft_cutoff_ratio=DEFAULT_FFT_CUTOFF,  # 0.30 tuned
+    sX_gain=DEFAULT_SX_GAIN,              # 1.8 tuned
     sX_use_variance=DEFAULT_SX_USE_VAR,
 )
 
@@ -400,10 +401,10 @@ print(f"<N_true> (trapz)              = {np.trapz(N2, x=u2)/(u2[-1]-u2[0]):.4f}"
 print(f"<N_hat>  (trapz) [pre-cal]    = {np.trapz(N_hat2, x=u2)/(u2[-1]-u2[0]):.4f}")
 print(f"<N_hat>  (trapz) [post-cal]   = {np.trapz(N_hat2_cal, x=u2)/(u2[-1]-u2[0]):.4f}")
 
-# 自动调参（cutoff × sX_gain，小网格；用于 FFT）
+# 自动调参（小网格；用于 FFT）
 def autotune_fft_and_sX(u, tau_true, T_meas, cfg_fwd,
                         cutoff_list=(0.20,0.25,0.30,0.35,0.40),
-                        sX_list=(0.0,0.25,0.5,1.0,2.0,4.0)):
+                        sX_list=(0.5,1.0,1.5,1.8,2.0,3.0)):
     best = None
     for fc in cutoff_list:
         for sg in sX_list:
@@ -433,8 +434,8 @@ T_hat1_aff = alpha1*T_hat1 + beta1
 rmse_aff1  = rmse(T_meas, T_hat1_aff);  nrmse_aff1 = nrmse(T_meas, T_hat1_aff)
 
 N_hat1_ref = refine_N_with_T_consistency(u, N_hat1_cal, T_meas, c0=cfg_fwd.c0,
-                                         step=0.6, iters=4, lp_ratio=0.35,
-                                         use_wiener=True, tv_on_log=True, tv_lam=5e-3)
+                                         step=0.5, iters=6, lp_ratio=0.30,
+                                         use_wiener=True, tv_on_log=True, tv_lam=2e-3)
 T_hat1_ref = (1.0/cfg_fwd.c0) * np.cumsum(N_hat1_ref) * du
 rmse_raw1_ref  = rmse(T_meas, T_hat1_ref);  nrmse_raw1_ref = nrmse(T_meas, T_hat1_ref)
 A = np.vstack([T_hat1_ref, np.ones_like(T_hat1_ref)]).T
@@ -461,8 +462,8 @@ T_hat2_aff = alpha2*T_hat2 + beta2
 rmse_aff2  = rmse(T_meas2, T_hat2_aff);  nrmse_aff2 = nrmse(T_meas2, T_hat2_aff)
 
 N_hat2_ref = refine_N_with_T_consistency(u2, N_hat2_cal, T_meas2, c0=cfg_fwd.c0,
-                                         step=0.6, iters=4, lp_ratio=0.35,
-                                         use_wiener=True, tv_on_log=True, tv_lam=5e-3)
+                                         step=0.5, iters=6, lp_ratio=0.30,
+                                         use_wiener=True, tv_on_log=True, tv_lam=2e-3)
 T_hat2_ref = (1.0/cfg_fwd.c0) * np.cumsum(N_hat2_ref) * du2
 rmse_raw2_ref  = rmse(T_meas2, T_hat2_ref);  nrmse_raw2_ref = nrmse(T_meas2, T_hat2_ref)
 A = np.vstack([T_hat2_ref, np.ones_like(T_hat2_ref)]).T
@@ -509,8 +510,8 @@ if RUN_DIAGNOSTICS:
 
     # 敏感度立方体（噪声 × fft_cutoff_ratio × sX_gain），trim 评估
     if RUN_NOISE_SCAN:
-        Daxis = (0.10, 0.15, 0.25, 0.35, 0.50, 0.70)    # 更宽更分辨
-        sX_scales = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+        Daxis = (0.10, 0.15, 0.25, 0.30, 0.35, 0.50, 0.70)    # wider
+        sX_scales = (0.5, 1.0, 1.5, 1.8, 2.0, 3.0)
         noise_scales = (0.5, 1.0, 2.0, 4.0)
         RM3 = np.zeros((len(noise_scales), len(Daxis), len(sX_scales)))
         for a_idx, nz in enumerate(noise_scales):
@@ -587,8 +588,8 @@ if EXPORT_CSV:
         tau_hat_cal, N_hat_cal, _k, _corr = calibrate_with_truth(u, tau, tau_hat, cfg_fwd.a, N_hat)
         # 一致性层一次
         N_ref = refine_N_with_T_consistency(u, N_hat_cal, T_meas, c0=cfg_fwd.c0,
-                                            step=0.6, iters=4, lp_ratio=0.35,
-                                            use_wiener=True, tv_on_log=True, tv_lam=5e-3)
+                                            step=0.5, iters=6, lp_ratio=0.30,
+                                            use_wiener=True, tv_on_log=True, tv_lam=2e-3)
         du = float(u[1]-u[0])
         T_hat = (1.0/cfg_fwd.c0) * np.cumsum(N_hat_cal) * du
         T_hat_ref = (1.0/cfg_fwd.c0) * np.cumsum(N_ref) * du
@@ -612,8 +613,8 @@ if EXPORT_CSV:
     print("Saved metrics_summary.csv")
 
     # 保存一个敏感度切片（noise=1.0）
-    Daxis = (0.10, 0.15, 0.25, 0.35, 0.50, 0.70)
-    sX_scales = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+    Daxis = (0.10, 0.15, 0.25, 0.30, 0.35, 0.50, 0.70)
+    sX_scales = (0.5, 1.0, 1.5, 1.8, 2.0, 3.0)
     uf, gf, pf, tf, Nf, Tf, Tm, _ = make_synthetic_forward(cfg_fwd, seed=SEED, mode='fft', timeit=False, noise_scale=1.0)
     RM_slice = []
     for i, dstr in enumerate(Daxis):
