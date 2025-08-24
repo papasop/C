@@ -3,7 +3,7 @@
 # - 与生产一致的带宽筛选 + 稳健 t* 选取
 # - UNIT_GAIN 一次性标定 → 冻结
 # - β_n 用同分布标定（标定集与生产一致），打印 Π≈1
-# - 保留原有导出：mc_summary.csv / blind_matrix.csv
+# - 保留导出：mc_summary.csv / blind_matrix.csv
 # - 新增导出：c0_mc_summary.csv / c0_blind_matrix.csv
 # ==============================================
 
@@ -13,16 +13,16 @@ from scipy.signal import convolve2d
 import pandas as pd
 import os
 
-# ---------- 物理常量 ----------
-G_CODATA = 6.67430e-11               # m^3 kg^-1 s^-2
-hbar = 1.054571817e-34               # J·s
-c0 = 299792458.0                     # m/s
+# ---------- 常量 ----------
+G_CODATA = 6.67430e-11
+hbar = 1.054571817e-34
+c0 = 299792458.0
 
-# ---------- 量纲占位（与旧稿保持一致） ----------
+# ---------- 量纲占位（保持与你原稿一致） ----------
 L_L, L_T, L_M = 1e-15, 1e-20, 0.063826
 UNIT_FACTOR = (L_L**3) / (L_M * L_T**2)
 
-# ---------- 统一网格 ----------
+# ---------- 网格 ----------
 x = np.linspace(150.0, 250.0, 300)
 t = np.linspace(4.7, 5.7, 100)
 dx = x[1] - x[0]
@@ -46,7 +46,7 @@ except Exception:
 def riemann_zeros(N=120):
     if _MP_OK:
         return np.array([float(mp.zetazero(k).imag) for k in range(1, N+1)], float)
-    # 无 mpmath 时给出平滑近似，仅为数值演示
+    # 无 mpmath 时：平滑近似，仅用于数值演示
     base, step = 14.134725, 2.0
     return base + step*np.arange(N, dtype=float)
 
@@ -292,7 +292,6 @@ def calibrate_unit_gain(dev_list, rule='argmax_abs_phic', strategy='median', rob
 
 # ---------- 参考 ∂x ln N 于 t*（不含噪声；可选振幅归一） ----------
 def grad_ref_at_tstar(shared, params, t_idx, A_pow=0.0, A_ref=0.10):
-    # 重建与生成器一致的 s1/s2、S1/S2、env，但不加噪声，不乘 A
     N = len(t)
     x_mid = 0.5*(x[0] + x[-1])
 
@@ -307,7 +306,6 @@ def grad_ref_at_tstar(shared, params, t_idx, A_pow=0.0, A_ref=0.10):
 
     s1 = track(shared['u_span1'], 'demean')
     s2 = track(shared['u_span2'], 'd_dt')
-    # 去相关 + 二次项，与生成器一致
     s2 = s2 - (np.dot(s2, s1) / (np.dot(s1, s1) + 1e-12)) * s1
     s2 = (s2 - np.mean(s2)) / (np.std(s2) + 1e-12)
     s2 = s2 + 0.10 * ((s1**2 - np.mean(s1**2)) / (np.std(s1**2) + 1e-12))
@@ -316,19 +314,14 @@ def grad_ref_at_tstar(shared, params, t_idx, A_pow=0.0, A_ref=0.10):
     S1 = norm_row(np.exp(-((x - (x_mid - 5.0))**2) / (2*params['sigma_x']**2)))
     S2 = norm_row(np.exp(-((x - (x_mid + 6.0))**2) / (2*(1.2*params['sigma_x'])**2)))
 
-    if params.get('t0', None) is None:
-        t0_local = 0.5*(t[0] + t[-1])
-    else:
-        t0_local = params['t0']
+    t0_local = params['t0'] if params.get('t0', None) is not None else 0.5*(t[0] + t[-1])
     env = np.exp(-0.5 * ((t - t0_local) / params['sigma_t'])**2)
     env /= (env.max() + 1e-12)
 
     lnN_row = s1[t_idx] * env[t_idx] * S1 + shared.get('mix_weight', 0.35) * s2[t_idx] * env[t_idx] * S2
-    # 中心差分 ∂x ln N
     grad_x = np.gradient(lnN_row, dx)
     gmed = float(np.median(np.abs(grad_x)))
 
-    # 振幅归一修正（可关）
     if A_pow != 0.0:
         gmed = gmed * (params['A'] / (A_ref + 1e-30))**A_pow
 
@@ -494,7 +487,8 @@ blind_specs = [
     (4.89, 0.08, 0.315, 8.0, 6, 0.00),
     (4.94, 0.10, 0.350, 8.0, 4, 0.00),
 ]
-rows, c0b_rows = []
+rows = []
+c0b_rows = []
 for i, (t0_, A_, st, sx, k_, nz) in enumerate(blind_specs):
     p = dict(phi2=7.8e-30, A=A_, sigma_t=st, sigma_x=sx, k=k_, t0=t0_, quantum_noise=nz)
     r = run_once(
@@ -527,3 +521,4 @@ print("已导出：blind_matrix.csv")
 
 pd.DataFrame(c0b_rows).to_csv("c0_blind_matrix.csv", index=False)
 print("已导出：c0_blind_matrix.csv")
+
